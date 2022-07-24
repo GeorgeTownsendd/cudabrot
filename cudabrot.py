@@ -20,9 +20,36 @@ def mandel(x, y, max_iters):
 
     return max_iters
 
-
+'''
 mandel_gpu = cuda.jit(uint32(f8, f8, uint32), device=True)(mandel)
 
+@jit
+def julia(x, y, a, b, max_iters):
+    c = complex(x, y)
+    z = complex(a, b)
+    for i in range(max_iters):
+        z = z * z + c
+        if (z.real * z.real + z.imag * z.imag) >= 4:
+            return i
+
+    return max_iters
+'''
+
+
+@jit
+def julia(x, y, max_iters):
+    c = complex(x, y)
+    z = complex(0, 0)
+    for i in range(max_iters):
+        z = z * z + c
+        if (z.real * z.real + z.imag * z.imag) >= 4:
+            return i
+
+    return max_iters
+
+
+mandel_gpu = cuda.jit(uint32(f8, f8, uint32), device=True)(mandel)
+julia_gpu = cuda.jit(uint32(f8, f8, uint32), device=True)(julia)
 
 @jit
 def create_fractal(min_x, max_x, min_y, max_y, image, iters):
@@ -42,21 +69,40 @@ def create_fractal(min_x, max_x, min_y, max_y, image, iters):
 
 @cuda.jit((f8, f8, f8, f8, uint8[:,:], uint32))
 def mandel_kernel(min_x, max_x, min_y, max_y, image, iters):
-  height = image.shape[0]
-  width = image.shape[1]
+    height = image.shape[0]
+    width = image.shape[1]
 
-  pixel_size_x = (max_x - min_x) / width
-  pixel_size_y = (max_y - min_y) / height
+    pixel_size_x = (max_x - min_x) / width
+    pixel_size_y = (max_y - min_y) / height
 
-  startX, startY = cuda.grid(2)
-  gridX = cuda.gridDim.x * cuda.blockDim.x;
-  gridY = cuda.gridDim.y * cuda.blockDim.y;
+    startX, startY = cuda.grid(2)
+    gridX = cuda.gridDim.x * cuda.blockDim.x;
+    gridY = cuda.gridDim.y * cuda.blockDim.y;
 
-  for x in range(startX, width, gridX):
-    real = min_x + x * pixel_size_x
-    for y in range(startY, height, gridY):
-      imag = min_y + y * pixel_size_y
-      image[y, x] = mandel_gpu(real, imag, iters)
+    for x in range(startX, width, gridX):
+        real = min_x + x * pixel_size_x
+        for y in range(startY, height, gridY):
+            imag = min_y + y * pixel_size_y
+            image[y, x] = mandel_gpu(real, imag, iters)
+
+
+@cuda.jit((f8, f8, f8, f8, uint8[:,:], uint32))
+def julia_kernel(min_x, max_x, min_y, max_y, image, iters):
+    height = image.shape[0]
+    width = image.shape[1]
+
+    pixel_size_x = (max_x - min_x) / width
+    pixel_size_y = (max_y - min_y) / height
+
+    startX, startY = cuda.grid(2)
+    gridX = cuda.gridDim.x * cuda.blockDim.x;
+    gridY = cuda.gridDim.y * cuda.blockDim.y;
+
+    for x in range(startX, width, gridX):
+        real = min_x + x * pixel_size_x
+        for y in range(startY, height, gridY):
+            imag = min_y + y * pixel_size_y
+            image[y, x] = julia_gpu(real, imag, iters)
 
 
 def rectangle_zoom(l, t, width, height, t_l, t_t, scale_factor):
@@ -72,23 +118,151 @@ def rectangle_zoom(l, t, width, height, t_l, t_t, scale_factor):
     return new_l, new_r, new_b, new_t
 
 
-size = np.array((1024, 1536)) * 1
+class FractalWindow:
+    def __init__(self, fractal_func, width, height, xy, ab, window_size=(1024, 1536)):
+        self.fractal_func = fractal_func
+        self.width = width
+        self.height = height
+        self.xy = xy
+        self.ab = ab
+
+        self.l = l
+        self.r = r
+        self.b = b
+        self.t = t
+
+        self.movex = 0
+        self.movey = 0
+        self.speed = 0.01
+        self.zoom_factor = 2
+        self.zoom_n = 1
+        self.size = window_size
+        self.zoom_changed = True
+
+    def tick(self):
+        if self.movex != 0 or self.movey != 0 or self.zoom_changed or self.new_fractal_func:
+            self.l += self.movex
+            self.r += self.movex
+
+            self.b += self.movey
+            self.t += self.movey
+
+            gimage = np.zeros(self.size, dtype=np.uint8)
+            blockdim = (32, 8)
+            griddim = (32, 16)
+
+            d_image = cuda.to_device(gimage)
+            self.fractal_func[griddim, blockdim](self.l, self.r, self.b, self.t, d_image, MAX_DEPTH)
+            gimage = d_image.copy_to_host()
+
+            self.surf = pygame.surfarray.make_surface(gimage.T)
+            self.surf.set_palette(colors)
+            self.zoom_changed = False
+            self.new_fractal_func = False
+
+        display.blit(self.surf, self.xy)
+
+    def zoom(self, steps):
+        for i in range(abs(steps)):
+            cwidth = abs(self.l-self.r)
+            cheight = abs(self.t-self.b)
+            t_l, t_t = np.mean([self.l, self.r]), np.mean([self.t, self.b])
+
+            if steps > 0:
+                self.l, self.r, self.b, self.t = rectangle_zoom(self.l, self.t, cwidth, cheight, t_l, t_t, 1 / self.zoom_factor)
+                self.speed = self.speed * 1/self.zoom_factor
+            elif steps < 0:
+                self.l, self.r, self.b, self.t = rectangle_zoom(self.l, self.t, cwidth, cheight, t_l, t_t, self.zoom_factor)
+                self.speed = self.speed * self.zoom_factor
+
+        self.zoom_n += steps
+        print(self.zoom_n)
+        self.zoom_changed = True
+
+    def coordinate_from_mouse(self, xy):
+        xc_range = abs(self.l - self.r)
+        yc_range = abs(self.t - self.b)
+
+        px, py = xy
+
+        rel_x = xc_range * (px / (size[1] - self.width))
+        rel_y = yc_range * (py / (size[0] - self.height))
+
+        xt, yt = self.l + rel_x, self.t + rel_y
+
+        return (xt, yt)
+
+    def update_fractal_func(self, mouse_coords):
+        #self.l, self.r, self.b, self.t = -2.0, 1.0, -1.0, 1.0
+
+        @jit
+        def new_julia(x, y, max_iters):
+            c = complex(x, y)
+            z = complex(mouse_coords[0], mouse_coords[1])
+            c, z = z, c
+            for i in range(max_iters):
+                z = z * z + c
+                if (z.real * z.real + z.imag * z.imag) >= 4:
+                    return i
+
+            return max_iters
+
+        new_julia_gpu = cuda.jit(uint32(f8, f8, uint32), device=True)(new_julia)
+
+        @cuda.jit((f8, f8, f8, f8, uint8[:, :], uint32))
+        def new_julia_kernel(min_x, max_x, min_y, max_y, image, iters):
+            height = image.shape[0]
+            width = image.shape[1]
+
+            pixel_size_x = (max_x - min_x) / width
+            pixel_size_y = (max_y - min_y) / height
+
+            startX, startY = cuda.grid(2)
+            gridX = cuda.gridDim.x * cuda.blockDim.x;
+            gridY = cuda.gridDim.y * cuda.blockDim.y;
+
+            for x in range(startX, width, gridX):
+                real = min_x + x * pixel_size_x
+                for y in range(startY, height, gridY):
+                    imag = min_y + y * pixel_size_y
+                    image[y, x] = new_julia_gpu(real, imag, iters)
+
+        self.fractal_func = new_julia_kernel
+        self.new_fractal_func = True
+
+
+
+size = np.array((768, 2048)) * 1
 display = pygame.display.set_mode(size[::-1])
 
-#t, b, l, r = -2.0, 1.0, -1.0, 1.0
-l, r, b, t = -2.0, -1.7, -0.1, 0.1
+cmap = plt.get_cmap('plasma', MAX_DEPTH)
+colors = cmap(np.linspace(0, 1 * (MAX_DEPTH//256), MAX_DEPTH)) * 255
+colors[:,-1] = 255
 
-zoom_factor = 2
-zoom_n = 1
+l, r, b, t = -2.0, 1.0, -1.0, 1.0
+#l, r, b, t = -2.0, -1.7, -0.1, 0.1
 
-movex, movey = 0, 0
-speed = 0.01
+
+
+mandel_frame = FractalWindow(julia_kernel, 1024, 2048, (0, 0), (0, 0), window_size=(768, 1024))
+mandel_frame2 = FractalWindow(julia_kernel, 1024, 2048, (1024, 0), (0, 0), window_size=(768, 1024))
+frames = [mandel_frame, mandel_frame2]
+
+update_right = False
 
 running = True
 frame_n = 0
 
 start_time = timer()
 while running:
+    mouse_pos = pygame.mouse.get_pos()
+    mouse_coords = mandel_frame.coordinate_from_mouse(mouse_pos)
+    if mouse_pos[0] < 1024:
+        highlighted_frame = mandel_frame
+        if update_right:
+            mandel_frame2.update_fractal_func(mouse_coords)
+    else:
+        highlighted_frame = mandel_frame2
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
@@ -96,72 +270,38 @@ while running:
 
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_UP:
-                movey = -speed
+                highlighted_frame.movey = -highlighted_frame.speed
             elif event.key == pygame.K_DOWN:
-                movey = speed
+                highlighted_frame.movey = highlighted_frame.speed
             elif event.key == pygame.K_LEFT:
-                movex = -speed
+                highlighted_frame.movex = -highlighted_frame.speed
             elif event.key == pygame.K_RIGHT:
-                movex = speed
+                highlighted_frame.movex = highlighted_frame.speed
 
 
         elif event.type == pygame.KEYUP:
             if event.key == pygame.K_UP:
-                movey = 0
+                highlighted_frame.movey = 0
             elif event.key == pygame.K_DOWN:
-                movey = 0
+                highlighted_frame.movey = 0
             elif event.key == pygame.K_LEFT:
-                movex = 0
+                highlighted_frame.movex = 0
             elif event.key == pygame.K_RIGHT:
-                movex = 0
+                highlighted_frame.movex = 0
 
         elif event.type == pygame.MOUSEWHEEL:
-            print(event.y)
-            if event.y == 1:
-                width = abs(l-r)
-                height = abs(t-b)
+            zoom_steps = event.y
+            highlighted_frame.zoom(zoom_steps)
 
-                t_l, t_t = np.mean([l, r]), np.mean([t, b])
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            if event.button == 1:
+                print(mouse_coords)
+                mandel_frame2.update_fractal_func(mouse_coords)
+            elif event.button == 2:
+                update_right = not update_right
 
-                l, r, b, t = rectangle_zoom(l, t, width, height, t_l, t_t, 1/zoom_factor)
-                speed = speed * 1/zoom_factor
-
-            if event.y == -1:
-                width = abs(l-r)
-                height = abs(t-b)
-
-                t_l, t_t = np.mean([l, r]), np.mean([t, b])
-
-                l, r, b, t = rectangle_zoom(l, t, width, height, t_l, t_t, zoom_factor)
-                speed = speed * zoom_factor
-
-
-
-    gimage = np.zeros(size, dtype=np.uint8)
-    blockdim = (32, 8)
-    griddim = (32, 16)
-
-    aspect_ratio = size[0] / size[1]
-
-    l += movex
-    r += movex
-
-    b += movey
-    t += movey
-
-    start_time = timer()
-    d_image = cuda.to_device(gimage)
-    mandel_kernel[griddim, blockdim](l, r, b, t, d_image, MAX_DEPTH)
-    gimage = d_image.copy_to_host()
-
-    surf = pygame.surfarray.make_surface(gimage.T)
-
-    cmap = plt.get_cmap("inferno", MAX_DEPTH)
-    colors = cmap(np.linspace(0, 1, MAX_DEPTH)) * 255
-
-    surf.set_palette(colors)
-
-    display.blit(surf, (0, 0))
+    mandel_frame.tick()
+    mandel_frame2.tick()
     pygame.display.update()
     frame_n += 1
 

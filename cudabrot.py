@@ -6,9 +6,12 @@ from numba import *
 from timeit import default_timer as timer
 import time
 
+from least_squares_example import perform_ls
+
 MAX_DEPTH = 256
 
 pygame.init()
+
 
 @jit
 def mandel(x, y, max_iters):
@@ -20,21 +23,6 @@ def mandel(x, y, max_iters):
             return i
 
     return max_iters
-
-'''
-mandel_gpu = cuda.jit(uint32(f8, f8, uint32), device=True)(mandel)
-
-@jit
-def julia(x, y, a, b, max_iters):
-    c = complex(x, y)
-    z = complex(a, b)
-    for i in range(max_iters):
-        z = z * z + c
-        if (z.real * z.real + z.imag * z.imag) >= 4:
-            return i
-
-    return max_iters
-'''
 
 
 @jit

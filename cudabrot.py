@@ -4,6 +4,7 @@ import numpy as np
 from numba import cuda
 from numba import *
 from timeit import default_timer as timer
+import time
 
 MAX_DEPTH = 256
 
@@ -152,18 +153,34 @@ class FractalWindow:
             griddim = (32, 16)
 
             d_image = cuda.to_device(gimage)
+
+            processing_start = time.time()
             self.fractal_func[griddim, blockdim](self.l, self.r, self.b, self.t, d_image, MAX_DEPTH)
+            processing_end = time.time()
+            self.last_frame_time = processing_end - processing_start
+
             gimage = d_image.copy_to_host()
 
             self.surf = pygame.surfarray.make_surface(gimage.T)
             self.surf.set_palette(colors)
             self.zoom_changed = False
             self.new_fractal_func = False
+        else:
+            processing_time = 1
 
         display.blit(self.surf, self.xy)
 
+        font = pygame.font.SysFont(None, 24)
+
+        render_time = font.render('Render time: {}'.format(round(self.last_frame_time, 10)), True, (0, 255, 0))
+        fps_indicator = font.render('FPS: {}'.format(round(1/self.last_frame_time, 10)), True, (0, 255, 0))
+
+        display.blit(render_time, self.xy + np.array([20, 20]))
+        display.blit(fps_indicator, self.xy + np.array([20, 40]))
+
     def zoom(self, steps):
         for i in range(abs(steps)):
+            i *= 1.2
             cwidth = abs(self.l-self.r)
             cheight = abs(self.t-self.b)
             t_l, t_t = np.mean([self.l, self.r]), np.mean([self.t, self.b])
@@ -176,7 +193,6 @@ class FractalWindow:
                 self.speed = self.speed * self.zoom_factor
 
         self.zoom_n += steps
-        print(self.zoom_n)
         self.zoom_changed = True
 
     def coordinate_from_mouse(self, xy):
@@ -230,6 +246,9 @@ class FractalWindow:
         self.fractal_func = new_julia_kernel
         self.new_fractal_func = True
 
+    def get_extent(self):
+        return self.l, self.b, self.r, self.t
+
 
 
 size = np.array((768, 2048)) * 1
@@ -241,7 +260,6 @@ colors[:,-1] = 255
 
 l, r, b, t = -2.0, 1.0, -1.0, 1.0
 #l, r, b, t = -2.0, -1.7, -0.1, 0.1
-
 
 
 mandel_frame = FractalWindow(julia_kernel, 1024, 2048, (0, 0), (0, 0), window_size=(768, 1024))

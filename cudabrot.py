@@ -152,6 +152,7 @@ class FractalWindow:
             blockdim = (32, 8)
             griddim = (32, 16)
 
+            copy_start = time.time()
             d_image = cuda.to_device(gimage)
 
             processing_start = time.time()
@@ -160,20 +161,20 @@ class FractalWindow:
             self.last_frame_time = processing_end - processing_start
 
             gimage = d_image.copy_to_host()
+            copy_end = time.time()
+            self.last_full_time = copy_end - copy_start
 
             self.surf = pygame.surfarray.make_surface(gimage.T)
             self.surf.set_palette(colors)
             self.zoom_changed = False
             self.new_fractal_func = False
-        else:
-            processing_time = 1
 
         display.blit(self.surf, self.xy)
 
         font = pygame.font.SysFont(None, 24)
 
-        render_time = font.render('Render time: {}'.format(round(self.last_frame_time, 10)), True, (0, 255, 0))
-        fps_indicator = font.render('FPS: {}'.format(round(1/self.last_frame_time, 10)), True, (0, 255, 0))
+        render_time = font.render('Render time: {} (including copy), {} (GPU render only)'.format(round(self.last_full_time, 5), round(self.last_frame_time, 5)), True, (0, 255, 0))
+        fps_indicator = font.render('FPS: {} (including copy), {} (GPU render only)'.format(round(1/self.last_full_time), round(1/self.last_frame_time)), True, (0, 255, 0))
 
         display.blit(render_time, self.xy + np.array([20, 20]))
         display.blit(fps_indicator, self.xy + np.array([20, 40]))
@@ -251,19 +252,19 @@ class FractalWindow:
 
 
 
-size = np.array((768, 2048)) * 1
+size = np.array((1024, 2048)) * 1
 display = pygame.display.set_mode(size[::-1])
 
 cmap = plt.get_cmap('plasma', MAX_DEPTH)
 colors = cmap(np.linspace(0, 1 * (MAX_DEPTH//256), MAX_DEPTH)) * 255
 colors[:,-1] = 255
 
-l, r, b, t = -2.0, 1.0, -1.0, 1.0
+l, r, b, t = -2.0, 1.0, -1.5, 1.5
 #l, r, b, t = -2.0, -1.7, -0.1, 0.1
 
 
-mandel_frame = FractalWindow(julia_kernel, 1024, 2048, (0, 0), (0, 0), window_size=(768, 1024))
-mandel_frame2 = FractalWindow(julia_kernel, 1024, 2048, (1024, 0), (0, 0), window_size=(768, 1024))
+mandel_frame = FractalWindow(julia_kernel, 1024, 2048, (0, 0), (0, 0), window_size=(1024, 1024))
+mandel_frame2 = FractalWindow(julia_kernel, 1024, 2048, (1024, 0), (0, 0), window_size=(1024, 1024))
 frames = [mandel_frame, mandel_frame2]
 
 update_right = False

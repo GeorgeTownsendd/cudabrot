@@ -124,7 +124,7 @@ class FractalWindow:
 
         self.movex = 0
         self.movey = 0
-        self.speed = 0.05
+        self.speed = self.width / 100
         self.zoom_factor = 2
         self.zoom_n = 1
         self.size = window_size
@@ -138,6 +138,8 @@ class FractalWindow:
 
             self.b += self.movey
             self.t += self.movey
+
+            self.speed = self.width / 100
 
             if self.cuda_enabled:
                 gimage = np.zeros(self.size, dtype=np.uint8)
@@ -178,11 +180,19 @@ class FractalWindow:
 
         font = pygame.font.SysFont(None, 24)
 
-        render_time = font.render('Render time: {} (including copy), {} (GPU render only)'.format(round(self.last_full_time, 5), round(self.last_frame_time, 5)), True, (0, 255, 0))
-        fps_indicator = font.render('FPS: {} (including copy), {} (GPU render only)'.format(round(1/self.last_full_time), round(1/self.last_frame_time)), True, (0, 255, 0))
+        fractal_type = font.render('FRACTAL TYPE: {}'.format('CUDA' if self.cuda_enabled else 'CPU'), True, (0, 255, 0))
+        render_time = font.render('Render time: {} (including copy), {} (GPU render only)'.format(round(self.last_full_time, 5), round(self.last_frame_time, 5)) if self.cuda_enabled else 'Render time: {}'.format(round(self.last_full_time, 5)), True, (0, 255, 0))
+        fps_indicator = font.render('FPS: {} (including copy), {} (GPU render only)'.format(round(1/self.last_full_time), round(1/self.last_frame_time)) if self.cuda_enabled else 'FPS: {}'.format(round(1/self.last_full_time)), True, (0, 255, 0))
+        extent = font.render('X: ({},  {}) Y: ({}, {})'.format(round(self.l, 5), round(self.r, 5), round(self.b, 5), round(self.t, 5)), True, (0, 255, 0))
 
-        display.blit(render_time, self.xy + np.array([20, 20]))
-        display.blit(fps_indicator, self.xy + np.array([20, 40]))
+        display.blit(fractal_type, self.xy + np.array([20, 20]))
+        display.blit(render_time, self.xy + np.array([20, 40]))
+        display.blit(fps_indicator, self.xy + np.array([20, 60]))
+        display.blit(extent, self.xy + np.array([20, 80]))
+
+        if not self.cuda_enabled:
+            downscale_factor = font.render('Downscale factor: {}'.format(self.resolution_downscale), True, (0, 255, 0))
+            display.blit(downscale_factor, self.xy + np.array([20, 100]))
 
     def zoom(self, steps):
         for i in range(abs(steps)):

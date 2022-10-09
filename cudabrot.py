@@ -6,12 +6,25 @@ from numba import *
 from timeit import default_timer as timer
 import time
 
-from least_squares_example import perform_ls
+from least_squares_example import *
 
 MAX_DEPTH = 256
 
 pygame.init()
 
+
+def poor_mans_ls_fractal(min_x, max_x, min_y, max_y, width, height, bit_depth=8, resolution_downscale=32):
+    print(min_x, max_x, min_y, max_y)
+    x = np.linspace(min_x, max_x, width//resolution_downscale)
+    y = np.linspace(min_y, max_y, height//resolution_downscale)
+
+    xx, yy = np.meshgrid(x, y)
+
+    color_stretch = 256 // bit_depth
+    zz = perform_ls(xx, yy) * color_stretch
+    print(np.max(zz))
+
+    return zz.repeat(resolution_downscale, axis=0).repeat(resolution_downscale, axis=1)
 
 @jit
 def mandel(x, y, max_iters):
@@ -39,6 +52,7 @@ def julia(x, y, max_iters):
 
 mandel_gpu = cuda.jit(uint32(f8, f8, uint32), device=True)(mandel)
 julia_gpu = cuda.jit(uint32(f8, f8, uint32), device=True)(julia)
+#ls_gpu = cuda.jit(uint32(f8, f8, uint32), device=True)(perform_ls)
 
 @cuda.jit((f8, f8, f8, f8, uint8[:,:], uint32))
 def mandel_kernel(min_x, max_x, min_y, max_y, image, iters):
@@ -86,14 +100,18 @@ def rectangle_zoom(l, t, width, height, t_l, t_t, scale_factor):
     new_height = height * scale_factor
 
     new_r = new_l + new_width
-    new_b = new_t + new_height
+    new_b = new_t - new_height
+
+    print(new_l, new_r, new_b, new_t)
 
     return new_l, new_r, new_b, new_t
 
 
 class FractalWindow:
-    def __init__(self, fractal_func, width, height, xy, ab, window_size=(1024, 1536)):
+    def __init__(self, fractal_func, width, height, xy, ab, window_size=(1024, 1536), cuda_enabled=True, resolution_downscale=32):
         self.fractal_func = fractal_func
+        self.cuda_enabled = cuda_enabled
+
         self.width = width
         self.height = height
         self.xy = xy
@@ -106,10 +124,11 @@ class FractalWindow:
 
         self.movex = 0
         self.movey = 0
-        self.speed = 0.01
+        self.speed = 0.05
         self.zoom_factor = 2
         self.zoom_n = 1
         self.size = window_size
+        self.resolution_downscale = resolution_downscale
         self.zoom_changed = True
 
     def tick(self):
@@ -120,23 +139,37 @@ class FractalWindow:
             self.b += self.movey
             self.t += self.movey
 
-            gimage = np.zeros(self.size, dtype=np.uint8)
-            blockdim = (32, 8)
-            griddim = (32, 16)
+            if self.cuda_enabled:
+                gimage = np.zeros(self.size, dtype=np.uint8)
+                blockdim = (32, 8)
+                griddim = (32, 16)
 
-            copy_start = time.time()
-            d_image = cuda.to_device(gimage)
+                copy_start = time.time()
+                d_image = cuda.to_device(gimage)
 
-            processing_start = time.time()
-            self.fractal_func[griddim, blockdim](self.l, self.r, self.b, self.t, d_image, MAX_DEPTH)
-            processing_end = time.time()
-            self.last_frame_time = processing_end - processing_start
+                processing_start = time.time()
+                self.fractal_func[griddim, blockdim](self.l, self.r, self.b, self.t, d_image, MAX_DEPTH)
+                processing_end = time.time()
+                self.last_frame_time = processing_end - processing_start
 
-            gimage = d_image.copy_to_host()
-            copy_end = time.time()
-            self.last_full_time = copy_end - copy_start
+                gimage = d_image.copy_to_host()
+                copy_end = time.time()
+                self.last_full_time = copy_end - copy_start
 
-            self.surf = pygame.surfarray.make_surface(gimage.T)
+                self.surf = pygame.surfarray.make_surface(gimage.T)
+            else:
+                copy_start = time.time()
+                processing_start = time.time()
+                print(self.resolution_downscale)
+                image = poor_mans_ls_fractal(self.l, self.r, self.b, self.t, self.width, self.height, resolution_downscale=self.resolution_downscale)
+                processing_end = time.time()
+                copy_end = time.time()
+                self.last_frame_time = processing_end - processing_start
+                self.last_full_time = copy_end - copy_start
+
+
+                self.surf = pygame.surfarray.make_surface(image)
+
             self.surf.set_palette(colors)
             self.zoom_changed = False
             self.new_fractal_func = False
@@ -234,10 +267,14 @@ colors[:,-1] = 255
 l, r, b, t = -2.0, 1.0, -1.5, 1.5
 #l, r, b, t = -2.0, -1.7, -0.1, 0.1
 
-
+l, r, b, t = -2.0, 1.0, -1.5, 1.5
 mandel_frame = FractalWindow(julia_kernel, 1024, 2048, (0, 0), (0, 0), window_size=(1024, 1024))
-mandel_frame2 = FractalWindow(julia_kernel, 1024, 2048, (1024, 0), (0, 0), window_size=(1024, 1024))
-frames = [mandel_frame, mandel_frame2]
+
+l, r, b, t = -100, 100, -100, 100
+ls_frame = FractalWindow(perform_ls, 1024, 2048, (1024, 0), (0, 0), window_size=(1024, 1024), cuda_enabled=False)
+
+
+frames = [mandel_frame, ls_frame]
 
 update_right = False
 
@@ -251,9 +288,9 @@ while running:
     if mouse_pos[0] < 1024:
         highlighted_frame = mandel_frame
         if update_right:
-            mandel_frame2.update_fractal_func(mouse_coords)
+            ls_frame.update_fractal_func(mouse_coords)
     else:
-        highlighted_frame = mandel_frame2
+        highlighted_frame = ls_frame
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
@@ -269,6 +306,14 @@ while running:
             elif event.key == pygame.K_RIGHT:
                 highlighted_frame.movex = highlighted_frame.speed
 
+            elif event.key == pygame.K_PAGEUP:
+                if not highlighted_frame.cuda_enabled:
+                    highlighted_frame.resolution_downscale //= 2
+                    highlighted_frame.zoom_changed = True
+            elif event.key == pygame.K_PAGEDOWN:
+                if not highlighted_frame.cuda_enabled:
+                    highlighted_frame.resolution_downscale *= 2
+                    highlighted_frame.zoom_changed = True
 
         elif event.type == pygame.KEYUP:
             if event.key == pygame.K_UP:
@@ -280,6 +325,8 @@ while running:
             elif event.key == pygame.K_RIGHT:
                 highlighted_frame.movex = 0
 
+
+
         elif event.type == pygame.MOUSEWHEEL:
             zoom_steps = event.y
             highlighted_frame.zoom(zoom_steps)
@@ -287,12 +334,12 @@ while running:
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1:
                 print(mouse_coords)
-                mandel_frame2.update_fractal_func(mouse_coords)
+                ls_frame.update_fractal_func(mouse_coords)
             elif event.button == 2:
                 update_right = not update_right
 
     mandel_frame.tick()
-    mandel_frame2.tick()
+    ls_frame.tick()
     pygame.display.update()
     frame_n += 1
 
